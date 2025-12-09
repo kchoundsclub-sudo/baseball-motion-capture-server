@@ -5,11 +5,18 @@ import mediapipe as mp
 import numpy as np
 import tempfile
 import os
-import requests
 import math
 
 app = Flask(__name__)
-CORS(app)
+
+# Configure CORS to allow all origins
+CORS(app, resources={
+    r"/*": {
+        "origins": "*",
+        "methods": ["GET", "POST", "OPTIONS"],
+        "allow_headers": ["Content-Type"]
+    }
+})
 
 # Initialize MediaPipe Pose
 mp_pose = mp.solutions.pose
@@ -44,14 +51,15 @@ def analyze_pitching_mechanics(video_path):
     fps = cap.get(cv2.CAP_PROP_FPS)
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     
+    print(f"Video info: {total_frames} frames at {fps} fps")
+    
     # Store metrics across frames
     elbow_angles = []
     knee_angles = []
     trunk_rotations = []
-    stride_times = []
     
     frame_count = 0
-    max_frames_to_analyze = min(total_frames, 300)  # Analyze max 10 seconds at 30fps
+    max_frames_to_analyze = min(total_frames, 300)
     
     while frame_count < max_frames_to_analyze:
         ret, frame = cap.read()
@@ -87,9 +95,9 @@ def analyze_pitching_mechanics(video_path):
                     landmarks[mp_pose.PoseLandmark.LEFT_KNEE],
                     landmarks[mp_pose.PoseLandmark.LEFT_ANKLE]
                 )
-                knee_angles.append(180 - knee_angle)  # Convert to flexion angle
+                knee_angles.append(180 - knee_angle)
             
-            # Trunk rotation (shoulder width change as proxy)
+            # Trunk rotation (shoulder width change)
             left_shoulder = landmarks[mp_pose.PoseLandmark.LEFT_SHOULDER]
             right_shoulder = landmarks[mp_pose.PoseLandmark.RIGHT_SHOULDER]
             shoulder_width = abs(right_shoulder.x - left_shoulder.x)
@@ -99,9 +107,11 @@ def analyze_pitching_mechanics(video_path):
     
     cap.release()
     
+    print(f"Analyzed {frame_count} frames, detected {len(elbow_angles)} elbow poses")
+    
     # Calculate biomechanical metrics
     if not elbow_angles:
-        # Fallback values if detection failed
+        print("Warning: No pose landmarks detected, using fallback values")
         return {
             "elbowAngleAtMER": 95,
             "leadLegKneeFlexionAtRelease": 55,
@@ -109,15 +119,15 @@ def analyze_pitching_mechanics(video_path):
             "strideFootContactTime": 0.45
         }
     
-    # Elbow angle at maximum external rotation (minimum angle during motion)
+    # Elbow angle at maximum external rotation
     elbow_at_mer = min(elbow_angles) if elbow_angles else 95
     
-    # Lead leg knee flexion at release (average of middle 30% of motion)
+    # Lead leg knee flexion at release
     mid_start = int(len(knee_angles) * 0.35)
     mid_end = int(len(knee_angles) * 0.65)
     knee_flexion = np.mean(knee_angles[mid_start:mid_end]) if knee_angles else 55
     
-    # Trunk rotation time (when shoulder width changes most)
+    # Trunk rotation time
     if len(trunk_rotations) > 10:
         rotation_changes = np.diff(trunk_rotations)
         max_rotation_frame = np.argmax(np.abs(rotation_changes))
@@ -125,7 +135,7 @@ def analyze_pitching_mechanics(video_path):
     else:
         trunk_time = 0.35
     
-    # Stride foot contact time (estimate from knee angle changes)
+    # Stride foot contact time
     if len(knee_angles) > 10:
         knee_changes = np.diff(knee_angles)
         max_knee_change_frame = np.argmax(np.abs(knee_changes))
@@ -133,46 +143,58 @@ def analyze_pitching_mechanics(video_path):
     else:
         stride_time = 0.45
     
-    return {
+    metrics = {
         "elbowAngleAtMER": round(float(elbow_at_mer), 1),
         "leadLegKneeFlexionAtRelease": round(float(knee_flexion), 1),
         "trunkRotationTime": round(float(trunk_time), 2),
         "strideFootContactTime": round(float(stride_time), 2)
     }
+    
+    print(f"Final metrics: {metrics}")
+    return metrics
 
 @app.route('/health', methods=['GET'])
 def health():
     """Health check endpoint"""
     return jsonify({"status": "healthy", "service": "MediaPipe Pose Analysis"}), 200
 
-@app.route('/analyze', methods=['POST'])
+@app.route('/analyze', methods=['POST', 'OPTIONS'])
 def analyze_video():
     """Analyze video file upload and return biomechanical metrics"""
+    # Handle OPTIONS preflight request
+    if request.method == 'OPTIONS':
+        return '', 204
+    
     try:
+        print(f"Received request: {request.method}")
+        print(f"Content-Type: {request.content_type}")
+        print(f"Files: {list(request.files.keys())}")
+        
         if 'video' not in request.files:
-            return jsonify({"error": "No video file provided"}), 400
+            return jsonify({"error": "No video file provided", "success": False}), 400
         
         video_file = request.files['video']
         
         if video_file.filename == '':
-            return jsonify({"error": "Empty filename"}), 400
+            return jsonify({"error": "Empty filename", "success": False}), 400
+        
+        print(f"Processing video: {video_file.filename}")
         
         # Save to temporary file
-        print(f"Received video upload: {video_file.filename}")
         with tempfile.NamedTemporaryFile(delete=False, suffix='.mp4') as tmp_file:
             video_file.save(tmp_file)
             tmp_path = tmp_file.name
         
-        print(f"Video saved to: {tmp_path}")
+        print(f"Video saved to: {tmp_path}, size: {os.path.getsize(tmp_path)} bytes")
         
         # Analyze video
-        print("Analyzing video with MediaPipe...")
+        print("Starting MediaPipe analysis...")
         metrics = analyze_pitching_mechanics(tmp_path)
         
-        # Clean up temporary file
+        # Clean up
         os.unlink(tmp_path)
         
-        print(f"Analysis complete: {metrics}")
+        print(f"Analysis complete, returning metrics")
         
         return jsonify({
             "success": True,
@@ -180,7 +202,9 @@ def analyze_video():
         }), 200
         
     except Exception as e:
-        print(f"Error analyzing video: {str(e)}")
+        print(f"ERROR: {str(e)}")
+        import traceback
+        traceback.print_exc()
         return jsonify({
             "success": False,
             "error": str(e)
@@ -188,4 +212,5 @@ def analyze_video():
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
+    print(f"Starting server on port {port}...")
     app.run(host='0.0.0.0', port=port)
