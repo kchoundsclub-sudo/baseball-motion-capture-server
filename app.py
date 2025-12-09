@@ -147,22 +147,20 @@ def health():
 
 @app.route('/analyze', methods=['POST'])
 def analyze_video():
-    """Analyze video from URL and return biomechanical metrics"""
+    """Analyze video file upload and return biomechanical metrics"""
     try:
-        data = request.json
-        video_url = data.get('videoUrl')
+        if 'video' not in request.files:
+            return jsonify({"error": "No video file provided"}), 400
         
-        if not video_url:
-            return jsonify({"error": "videoUrl is required"}), 400
+        video_file = request.files['video']
         
-        # Download video to temporary file
-        print(f"Downloading video from: {video_url}")
-        response = requests.get(video_url, timeout=60)
-        response.raise_for_status()
+        if video_file.filename == '':
+            return jsonify({"error": "Empty filename"}), 400
         
         # Save to temporary file
+        print(f"Received video upload: {video_file.filename}")
         with tempfile.NamedTemporaryFile(delete=False, suffix='.mp4') as tmp_file:
-            tmp_file.write(response.content)
+            video_file.save(tmp_file)
             tmp_path = tmp_file.name
         
         print(f"Video saved to: {tmp_path}")
